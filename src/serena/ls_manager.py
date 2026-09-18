@@ -3,6 +3,7 @@
 import logging
 import os.path
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -300,6 +301,45 @@ class LanguageServerFileChangeNotifier:
             with LogTime("Initialising file change notifier (polling for baseline)"):
                 self.poll_and_notify()
 
+    # LOCAL PATCH (CodeMem) - see oraios/serena#2077.
+    #
+    # poll_and_notify runs before symbolic tool calls, and its cost scales with the tracked file
+    # count rather than with the number of changes. Measured on the CodeMem tree (97,549 tracked
+    # files) with the is_ignored_path hint already applied: 14.5s walk + 9.8s stat = 24.3s PER CALL.
+    # Against a 45s tool timeout that spends half the budget before the language server is asked.
+    #
+    # Top-level directories listed here are not polled. The case for excluding one is that nothing
+    # edits it outside Serena - a vendored dependency or, here, an engine the project's own CLAUDE.md
+    # makes read-only. On this tree 96,240 of the 97,549 tracked files are under UnrealEngine/, so
+    # excluding it costs nothing real and takes the poll to 3.5s.
+    #
+    # Defaults to EMPTY, i.e. stock behaviour: a project-specific default does not belong in code
+    # that is meant to go upstream, and silently skipping a directory the user did not ask to skip
+    # would be worse than being slow. CodeMem sets SERENA_FRESHNESS_SKIP=UnrealEngine at the
+    # launcher; see CODEMEM-FORK.md. _SLOW_POLL_WARN_S exists so that forgetting to set it is
+    # noisy rather than silent.
+    _FRESHNESS_SKIP_TOP_LEVEL = frozenset(p.strip() for p in os.environ.get("SERENA_FRESHNESS_SKIP", "").split(",") if p.strip())
+    _SLOW_POLL_WARN_S = float(os.environ.get("SERENA_FRESHNESS_SLOW_WARN_S", "5"))
+
+    def _freshness_source_files(self) -> list[str]:
+        """The files the freshness poll considers, honouring _FRESHNESS_SKIP_TOP_LEVEL."""
+        if not self._FRESHNESS_SKIP_TOP_LEVEL:
+            return self._project.gather_source_files()
+        root = self._project.project_root
+        files: list[str] = []
+        for entry in sorted(os.listdir(root)):
+            if entry in self._FRESHNESS_SKIP_TOP_LEVEL:
+                continue
+            abs_entry = os.path.join(root, entry)
+            is_file = os.path.isfile(abs_entry)
+            if self._project.is_ignored_path(abs_entry, ignore_non_source_files=is_file, is_file=is_file):
+                continue
+            if is_file:
+                files.append(entry)
+            else:
+                files.extend(self._project.gather_source_files(entry))
+        return files
+
     def poll_and_notify(self) -> int:
         """
         Detects source files that were changed, created or deleted on disk since the last call
@@ -319,12 +359,24 @@ class LanguageServerFileChangeNotifier:
         :return: the number of change events sent (0 if nothing changed, if no language server is
             running yet, or on the first call, which only establishes the baseline).
         """
+        poll_started = time.monotonic()
         current: dict[str, float] = {}
-        for rel_path in self._project.gather_source_files():
+        for rel_path in self._freshness_source_files():
             try:
                 current[rel_path] = os.stat(os.path.join(self._project.project_root, rel_path)).st_mtime
             except OSError:
                 continue
+        poll_s = time.monotonic() - poll_started
+        if poll_s > self._SLOW_POLL_WARN_S:
+            # This runs before symbolic tool calls, so a slow poll is spent out of every one of their
+            # timeouts. Warn rather than let it look like the language server being slow.
+            log.warning(
+                "File system freshness poll took %.1fs for %d tracked files, and runs before symbolic tool calls. "
+                "Narrow the project's ignored_paths, or set SERENA_FRESHNESS_SKIP to a comma-separated list of "
+                "top-level directories nothing edits outside Serena.",
+                poll_s,
+                len(current),
+            )
 
         # Read-diff-swap under the lock only; the filesystem walk above and the LSP notifications
         # below stay outside it so concurrent callers do not serialize on I/O.
