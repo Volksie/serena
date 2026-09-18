@@ -3,6 +3,7 @@ Language server-related tools
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import logging
 import os
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlparse
@@ -20,6 +21,8 @@ from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 
 if TYPE_CHECKING:
     from serena.repl.api.lsp_api import LspApi
+
+log = logging.getLogger(__name__)
 
 
 class LspApiMixin:
@@ -206,7 +209,17 @@ class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
         matches: list[dict[str, Any]] = []
         unsupported: list[str] = []
         for ls in servers:
-            symbols = ls.request_workspace_symbol(query)
+            # One server must not be able to sink the whole call. `workspace/symbol` is optional in
+            # LSP, and a server that does not implement it may simply never reply rather than
+            # returning an error - measured 2026-09-18, asking every running server made this tool
+            # block for the full 40s request timeout on a non-answering one and never reach clangd
+            # at all, which looked exactly like clangd being broken. Record it and move on.
+            try:
+                symbols = ls.request_workspace_symbol(query)
+            except Exception as exc:  # any failure of one server is that server's problem, not this call's
+                log.info("workspace/symbol failed for language server %r: %r", ls.language_id, exc)
+                unsupported.append(ls.language_id)
+                continue
             if symbols is None:
                 # workspace/symbol is optional in LSP. Saying so beats implying the symbol is absent.
                 unsupported.append(ls.language_id)
