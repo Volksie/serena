@@ -12,6 +12,12 @@ Status of the `main` branch. Changes prior to the next official version change w
     see `CONTRIBUTING.md`
 
 * General:
+  - Performance: `Project.gather_source_files` re-derived from the filesystem, for every path, whether that
+    path was a file or a directory — although `os.walk` had already told it. Each `is_ignored_path` call
+    therefore cost an `os.path.exists`, an `os.path.isfile` and an `os.path.isdir`. `is_ignored_path` and
+    `match_path` now take an optional hint the traversal supplies. On a repository with ~97.5k tracked
+    source files (of ~708k total) the walk went from **67.8s to 11.6s**, returning a byte-identical file
+    list. Callers that pass no hint are unaffected (#2077)
   - **Major**: Add the Serena REPL as a new agent interface, reducing the tool set to a minimum and providing
     a general code execution environment for all Serena operations.
     This has several significant advantages over regular tool executions.  
