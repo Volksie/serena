@@ -170,6 +170,12 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
 # index exactly so that `workspace/symbol` can answer "where is X" without touching the filesystem.
 #
 # This adds the missing caller. It introduces no capability the language server does not already have.
+#
+# `language` defaults to "cpp" rather than to "every running server". Asking every server costs the
+# full request timeout for each one that does not implement workspace/symbol - they may never reply
+# rather than returning an error - and on a project with five language servers that exceeds the tool
+# timeout before the one with an index is reached. A per-language default is a project-specific
+# choice, which is why upstream (#2075) should pick its own rather than inherit this one.
 class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
     """
     Finds symbols by name across the whole workspace from the language server's own index
@@ -182,7 +188,7 @@ class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
     def apply(
         self,
         query: str,
-        language: str = "",
+        language: str = "cpp",
         max_matches: int = 50,
         max_answer_chars: int = -1,
     ) -> str:
@@ -191,8 +197,9 @@ class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
 
         :param query: the symbol name, or a fragment of it. Matching is the language server's own;
             clangd matches fuzzily, so a partial name works.
-        :param language: which language server to ask, by its language id (e.g. "cpp", "csharp",
-            "python"). Empty (the default) asks every running language server.
+        :param language: which language server to ask, by its language id. Defaults to "cpp";
+            pass "csharp" for build code, "python" for scripting, and so on. Empty asks every
+            running server, which is slow: see the note on the class.
         :param max_matches: maximum number of matches to return; -1 for no limit.
         :param max_answer_chars: if the output is longer than this many characters it is shortened;
             -1 uses the configured default.
