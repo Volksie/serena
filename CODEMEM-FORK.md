@@ -36,40 +36,48 @@ Install from the fork rather than editing an installed package in place:
 
     uv tool install --reinstall -p 3.13 git+https://github.com/Volksie/serena@codemem
 
-## Patch status against `main`
+## REQUIRED: launcher setting
 
-Checked 2026-09-18 against `bd2712fd`. "Applies" means `patch --dry-run` succeeds; it does **not**
-mean the patch is still *correct*, because the surrounding code has moved in every case.
+Set this wherever Serena is started for CodeMem (the `Serena MCP (CodeMem)` scheduled task):
 
-| Patch | Component | Applies to 2.x? | Upstream route |
-|---|---|---|---|
-| C#: open only non-ignored `.csproj` | **MIT** (`solidlsp`) | **Yes**, offset 1 line | Direct PR — a small bug fix under CONTRIBUTING's scope rules |
-| `find_symbol` scope guard | GPL | **No** — both hunks fail | Rewrite by hand, then open an issue first: it changes an existing tool's behaviour |
-| `find_symbol_indexed` (new tool) | GPL | n/a — a new class, not a diff | Open an issue first |
-| Freshness poll: skip the engine | GPL | **Yes**, offset 7 lines — but `poll_and_notify` was rewritten upstream and now iterates `gather_source_files()`, so it already honours ignore rules | **Re-measure before writing anything.** The remaining cost is one `os.stat` per tracked file before every symbolic call; whether that still hurts is an open question on this tree |
+    SERENA_FRESHNESS_SKIP=UnrealEngine
 
-### Why each one exists
+Without it the freshness poll walks the engine on **every symbolic tool call**: measured 24.3s
+against 3.5s, out of a 45s tool timeout. The code deliberately defaults to stock behaviour rather
+than to this value, because a project-specific default does not belong in code meant to go upstream.
+Forgetting it is noisy rather than silent - the poll logs a warning above 5s naming the variable.
 
-- **C# `.csproj`.** `CSharpLanguageServer._open_projects` scans the repository root and opens every
-  `.csproj` it finds, without consulting the project's own `ignored_paths`. On the Unreal tree that is
-  245 projects, 53 under `Engine/Source/ThirdParty`, which Roslyn cannot build; they emit thousands of
-  NuGet advisory lines per restart and end in `The "Csc" task could not be initialized`. The base class
-  already exposes `is_ignored_path()`; the patch just applies the one to the other.
-- **`find_symbol` scope guard.** `FindSymbolTool` accepts an empty `relative_path`, documented as
-  "searches entire codebase", and reaches it through `request_full_symbol_tree`, which walks the
-  directory tree and requests document symbols file by file. Scoped to one file that is instant.
-  Unscoped on a tree this size it outlives the client timeout by hours and has crashed clangd.
-- **`find_symbol_indexed`.** `SolidLanguageServer.request_workspace_symbol()` — a complete
-  `workspace/symbol` request that clangd answers from its background index — exists in
-  `src/solidlsp/ls.py` and, as of `bd2712fd`, **nothing in `src/serena` calls it**. This adds the
-  missing caller. It introduces no capability the language server does not already have.
-- **Freshness poll.** `poll_and_notify` runs before every symbolic tool call. Upstream has since
-  narrowed what it walks; the original problem was that it walked everything.
+Optional: `SERENA_FIND_SYMBOL_MAX_SCOPE_FILES` (default 1000, 0 disables the `find_symbol` guard)
+and `SERENA_FRESHNESS_SLOW_WARN_S` (default 5).
 
-## Contributing upstream from here
+## What this branch carries
 
-Upstream requires a CLA (`CLA.md`), accepted once via the CLA assistant bot on your first PR, and it
-applies repository-wide including SolidLSP-only changes. Each PR wants a single logical change, a
-`CHANGELOG.md` entry in the matching section, an SPDX header on any new file, and `poe format` plus
-`poe type-check` clean. Do not open PRs against the REPL — it is a beta feature and they have asked
-for issues instead.
+Ported to 2.x and committed on `codemem`. Every one was rewritten rather than rebased, because the
+surrounding code moved in all four cases; each commit message records what changed and why.
+
+| Commit | What | Upstream |
+|---|---|---|
+| `58ded458` | `is_ignored_path` takes an `is_file` hint from the traversal that already knows. Walk **67.8s -> 11.6s**, byte-identical output | **[PR #2078](https://github.com/oraios/serena/pull/2078)** |
+| `bee600fe` | `find_symbol` scope guard, moved to `LspApi` so the REPL is covered too, counting by the project's own ignore rules rather than a hardcoded extension list | [#2076](https://github.com/oraios/serena/issues/2076) |
+| `446066ec` | `find_symbol_indexed`, the missing caller for `request_workspace_symbol` | [#2075](https://github.com/oraios/serena/issues/2075) |
+| `51296ff0` | Freshness-poll skip list plus a slow-poll warning. **24.3s -> 3.5s** per call | [#2077](https://github.com/oraios/serena/issues/2077) |
+
+Not on this branch, because it is already upstream-only: the C# `.csproj` ignore fix,
+**[PR #2074](https://github.com/oraios/serena/pull/2074)** (MIT component, awaiting review).
+
+## Measurements, for whoever revisits this
+
+All against the CodeMem tree: Unreal Engine 5.8 source plus three game projects, 707,889 files on
+disk, 97,549 tracked as source, five language servers. Windows 11, Python 3.13.
+
+| | |
+|---|---|
+| bare `os.walk` of the whole tree | 10.7s |
+| `gather_source_files()` before the hint | 67.8s |
+| `gather_source_files()` after the hint | 11.6s |
+| freshness poll, full tree | 24.3s per symbolic call |
+| freshness poll, engine skipped | 3.5s per symbolic call |
+| tracked files outside `UnrealEngine/` | **1,309 of 97,549** |
+
+The last row is why skipping the engine costs nothing: 98.7% of the tracked set is an engine the
+project treats as read-only, so polling it detects edits that cannot happen.
