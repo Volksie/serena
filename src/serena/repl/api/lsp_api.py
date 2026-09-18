@@ -38,6 +38,66 @@ from ..representable import Renderer, RepresentableViaRenderer
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
+    from serena.project import Project
+
+
+# LOCAL PATCH (CodeMem) - find_symbol scope guard. Proposed upstream as oraios/serena#2076.
+#
+# find_symbol with no relative_path reaches SymbolManager.find, which iterates EVERY configured
+# language server and calls request_full_symbol_tree on each; that walks the directory tree and
+# issues a document-symbol request per file. The tool timeout bounds the REPLY, not the work: on
+# 2026-09-12 an unscoped call timed out at 45s on the client and kept walking for four hours
+# server-side, and clangd died twice on an ISPC source file it should never have been handed.
+# Refusing up front is the only bound that holds, because the running walk cannot be cancelled.
+#
+# Set SERENA_FIND_SYMBOL_MAX_SCOPE_FILES=0 to disable the guard entirely.
+_FIND_SYMBOL_MAX_SCOPE_FILES = int(os.environ.get("SERENA_FIND_SYMBOL_MAX_SCOPE_FILES", "1000"))
+
+_FIND_SYMBOL_SCOPE_HINT = (
+    "Narrow relative_path to a single file or a smaller directory. To locate the file first, use "
+    "find_symbol_indexed, which answers from the language server's own index."
+)
+
+
+def _find_symbol_scope_refusal(project: "Project", relative_path: str) -> str | None:
+    """The reason this scope must be refused, or None if it is safe to search.
+
+    Counting stops as soon as the limit is passed, so the check costs at most the limit rather than
+    the size of the directory. Which files count is decided by the project's own ignore settings
+    rather than by a hardcoded extension list, so the guard means the same thing in every language
+    and honours whatever the user has already excluded.
+    """
+    if _FIND_SYMBOL_MAX_SCOPE_FILES <= 0:
+        return None
+
+    rel = (relative_path or "").strip().replace("\\", "/").strip("/")
+    if rel in ("", "."):
+        return (
+            "Refused: find_symbol without relative_path searches every file in the project, using every "
+            "configured language server. On a large repository that does not finish, and it keeps running "
+            f"after this call times out. {_FIND_SYMBOL_SCOPE_HINT}"
+        )
+
+    abs_path = os.path.join(project.project_root, rel)
+    if not os.path.isdir(abs_path):
+        # A file scope, or a path that does not exist: cheap either way, and a missing path should
+        # produce the language server's own error rather than this one.
+        return None
+
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(abs_path):
+        dirnames[:] = [d for d in dirnames if not project.is_ignored_path(os.path.join(dirpath, d), is_file=False)]
+        for filename in filenames:
+            if project.is_ignored_path(os.path.join(dirpath, filename), ignore_non_source_files=True, is_file=True):
+                continue
+            count += 1
+            if count > _FIND_SYMBOL_MAX_SCOPE_FILES:
+                return (
+                    f"Refused: relative_path '{rel}' contains more than {_FIND_SYMBOL_MAX_SCOPE_FILES} source "
+                    "files. A directory-scoped find_symbol opens every one of them and keeps running after this "
+                    f"call times out. {_FIND_SYMBOL_SCOPE_HINT}"
+                )
+    return None
 
 
 class LspSymbolCollection(RepresentableViaRenderer):
@@ -490,6 +550,12 @@ class LspApi(FacadeApi):
         :return: the symbols (with locations) matching the name path pattern
         """
         # Note: file system sync not required; the symbol finder opens all relevant source files explicitly in the case of changes
+
+        # LOCAL PATCH (CodeMem): refuse a scope that would not finish. See _find_symbol_scope_refusal.
+        # Placed here rather than on FindSymbolTool so the REPL is covered by the same bound.
+        refusal = _find_symbol_scope_refusal(self._get_project(), relative_path)
+        if refusal is not None:
+            raise ValueError(refusal)
 
         if include_body:
             depth = 0  # ignore user-specified depth if include_body is True
