@@ -3,7 +3,9 @@ Language server-related tools
 """
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import TYPE_CHECKING, cast
+import os
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote, urlparse
 
 from serena.symbol import SymbolDictGrouper
 from serena.tools import (
@@ -14,6 +16,7 @@ from serena.tools import (
 )
 from serena.tools.file_tools import EditApiMixin
 from serena.tools.tools_base import ToolMarkerOptional
+from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 
 if TYPE_CHECKING:
     from serena.repl.api.lsp_api import LspApi
@@ -153,6 +156,93 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
     @classmethod
     def get_param_aliases(cls) -> dict[str, str]:
         return {"name_path": "name_path_pattern"}
+
+
+# LOCAL PATCH (CodeMem) - proposed upstream as oraios/serena#2075.
+#
+# SolidLanguageServer.request_workspace_symbol() is a complete `workspace/symbol` implementation and
+# nothing under src/serena calls it. Every symbol lookup instead goes through request_full_symbol_tree,
+# which walks the directory tree and asks for document symbols file by file - so Serena redoes work the
+# language server has already done. clangd, rust-analyzer, gopls and jdtls all maintain a background
+# index exactly so that `workspace/symbol` can answer "where is X" without touching the filesystem.
+#
+# This adds the missing caller. It introduces no capability the language server does not already have.
+class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
+    """
+    Finds symbols by name across the whole workspace from the language server's own index
+    (LSP workspace/symbol). Use this to locate a class, function or type when you do not know which
+    file it is in: it answers from the index instead of walking every file, so it stays fast on very
+    large trees. Returns each match's name, kind, container and file:line; follow up with find_symbol
+    and relative_path set to that file to read the body.
+    """
+
+    def apply(
+        self,
+        query: str,
+        language: str = "",
+        max_matches: int = 50,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Looks symbols up by name in the language server's workspace index.
+
+        :param query: the symbol name, or a fragment of it. Matching is the language server's own;
+            clangd matches fuzzily, so a partial name works.
+        :param language: which language server to ask, by its language id (e.g. "cpp", "csharp",
+            "python"). Empty (the default) asks every running language server.
+        :param max_matches: maximum number of matches to return; -1 for no limit.
+        :param max_answer_chars: if the output is longer than this many characters it is shortened;
+            -1 uses the configured default.
+        :return: a JSON list of matches, each with name, kind, container, relative_path and line.
+        """
+        ls_manager = self.project.get_language_server_manager_or_raise()
+        servers = [ls for ls in ls_manager.iter_language_servers() if not language or ls.language_id == language]
+        if not servers:
+            # An empty list would read as "no such symbol", which is a different and wrong answer.
+            return self._to_json(
+                {"error": f"no {language!r} language server is running for this project" if language else "no language server is running"}
+            )
+
+        matches: list[dict[str, Any]] = []
+        unsupported: list[str] = []
+        for ls in servers:
+            symbols = ls.request_workspace_symbol(query)
+            if symbols is None:
+                # workspace/symbol is optional in LSP. Saying so beats implying the symbol is absent.
+                unsupported.append(ls.language_id)
+                continue
+            for sym in symbols:
+                location = sym.get("location") or {}
+                uri = location.get("uri", "")
+                path = unquote(urlparse(uri).path) if uri else ""
+                if len(path) > 2 and path[0] == "/" and path[2] == ":":  # file:///C:/... on Windows
+                    path = path[1:]
+                try:
+                    relative = os.path.relpath(path, ls.repository_root_path) if path else ""
+                except ValueError:  # a different drive on Windows
+                    relative = path
+                start = (location.get("range") or {}).get("start") or {}
+                try:
+                    kind_name = SymbolKind(sym.get("kind")).name
+                except ValueError:
+                    kind_name = str(sym.get("kind"))
+                matches.append(
+                    {
+                        "name": sym.get("name"),
+                        "kind": kind_name,
+                        "container": sym.get("containerName") or "",
+                        "relative_path": relative.replace("\\", "/"),
+                        "line": (start.get("line", -1) + 1) if start else None,
+                    }
+                )
+                if 0 <= max_matches <= len(matches):
+                    break
+            if 0 <= max_matches <= len(matches):
+                break
+
+        if not matches and unsupported:
+            return self._to_json({"error": f"no index available: {', '.join(unsupported)} does not implement workspace/symbol"})
+        return self._limit_length(self._to_json(matches), max_answer_chars)
 
 
 class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
