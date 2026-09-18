@@ -62,8 +62,11 @@ surrounding code moved in all four cases; each commit message records what chang
 | `446066ec` | `find_symbol_indexed`, the missing caller for `request_workspace_symbol` | [#2075](https://github.com/oraios/serena/issues/2075) |
 | `51296ff0` | Freshness-poll skip list plus a slow-poll warning. **24.3s -> 3.5s** per call | [#2077](https://github.com/oraios/serena/issues/2077) |
 
-Not on this branch, because it is already upstream-only: the C# `.csproj` ignore fix,
-**[PR #2074](https://github.com/oraios/serena/pull/2074)** (MIT component, awaiting review).
+| `68bf8d7a` | C#: open only non-ignored `.csproj` files. **MIT component** | **[PR #2074](https://github.com/oraios/serena/pull/2074)** |
+
+Everything not yet merged upstream is on this branch, including the two that are already submitted as
+pull requests - so installing `codemem` gives the whole set, and each one drops off on the next
+rebase after it lands.
 
 ## Measurements, for whoever revisits this
 
