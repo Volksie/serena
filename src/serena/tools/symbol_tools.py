@@ -242,6 +242,27 @@ class FindSymbolIndexedTool(Tool, ToolMarkerSymbolicRead):
 
         if not matches and unsupported:
             return self._to_json({"error": f"no index available: {', '.join(unsupported)} does not implement workspace/symbol"})
+        if not matches:
+            # An empty list here reads as "no such symbol", and on a freshly started server that is
+            # simply false. Measured on clangd 22.1.3, 2026-09-18: a `workspace/symbol` sent before
+            # any file has been opened returns 0 results in 0.00s, because clangd does not load its
+            # compilation database until the first didOpen - its own log prints "Loaded compilation
+            # database" and "Enqueueing 25887 commands for indexing" only after that point. Opening
+            # one file and asking again returned 14 results within 15s.
+            #
+            # The warm-up is deliberately NOT done here: it makes the language server index the whole
+            # project, which is a large side effect for a lookup, and the caller may not want it yet.
+            return self._to_json(
+                {
+                    "matches": [],
+                    "caveat": (
+                        "No matches, but this may not mean the symbol is absent: a language server "
+                        "that has not yet opened a file has no compilation database loaded and its "
+                        "index is empty, so it answers instantly with nothing. Run any scoped query "
+                        "first (find_symbol with relative_path set to a source file), then retry this."
+                    ),
+                }
+            )
         return self._limit_length(self._to_json(matches), max_answer_chars)
 
 
