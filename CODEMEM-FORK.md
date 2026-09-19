@@ -63,6 +63,7 @@ surrounding code moved in all four cases; each commit message records what chang
 | `51296ff0` | Freshness-poll skip list plus a slow-poll warning. **24.3s -> 3.5s** per call | [#2077](https://github.com/oraios/serena/issues/2077) |
 
 | `68bf8d7a` | C#: open only non-ignored `.csproj` files. **MIT component** | **[PR #2074](https://github.com/oraios/serena/pull/2074)** |
+| `3eafeb7d` | asyncio accept-loop hardening: a transient `accept()` error (`WinError 64`) no longer closes the listening socket. Was a `sitecustomize.py` in the venv on 1.7.0 and silently dropped by every reinstall; now `serena/util/accept_hardening.py`, installed by `start_mcp_server` for network transports. Not upstreamable: the bug is CPython's | local only |
 
 Everything not yet merged upstream is on this branch, including the two that are already submitted as
 pull requests - so installing `codemem` gives the whole set, and each one drops off on the next
