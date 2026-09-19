@@ -408,6 +408,12 @@ class TopLevelCommands(AutoRegisteringGroup):
                 "Positional project arg is deprecated; use --project instead. Used: %s",
                 project_file,
             )
+        if transport != "stdio":
+            # LOCAL PATCH (CodeMem): keep the listening socket alive across transient accept() errors on
+            # Windows; must run before the event loop starts serving. See serena/util/accept_hardening.py.
+            from serena.util.accept_hardening import install as install_accept_hardening
+
+            install_accept_hardening()
         log.info("Starting MCP server …")
         server.run(transport=transport)
 
