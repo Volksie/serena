@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Tests for the find_symbol scope guard (LOCAL PATCH, proposed upstream as oraios/serena#2076).
+"""Tests for the find_symbol scope guard (LOCAL PATCH; oraios/serena#2076, closed upstream as not
+planned on 2026-09-19, so this stays fork-local).
 
 The guard's job is to refuse a search that would not finish, and otherwise to stay entirely out of
 the way. Both halves matter equally: a guard that refuses a legitimate scope is worse than no guard,

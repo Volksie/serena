@@ -41,7 +41,13 @@ if TYPE_CHECKING:
     from serena.project import Project
 
 
-# LOCAL PATCH (CodeMem) - find_symbol scope guard. Proposed upstream as oraios/serena#2076.
+# LOCAL PATCH (CodeMem) - find_symbol scope guard. PERMANENT: an upgrade reverts it, re-apply it.
+#
+# Proposed upstream as oraios/serena#2076 and CLOSED as not planned on 2026-09-19: "Searching the
+# entire codebase [is] a standard use case and cannot be forbidden." That is a reasonable position for
+# a general tool and does not change the measurement below, so the guard stays here rather than being
+# argued again. The upstream path is #2075 instead - an index-backed lookup that answers the same
+# question without the walk, which is what find_symbol_indexed already does here.
 #
 # find_symbol with no relative_path reaches SymbolManager.find, which iterates EVERY configured
 # language server and calls request_full_symbol_tree on each; that walks the directory tree and
