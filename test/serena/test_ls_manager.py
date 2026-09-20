@@ -4,6 +4,7 @@ import time
 
 import psutil
 import pytest
+from unittest.mock import MagicMock
 
 from serena.ls_manager import LanguageServerManager, LanguageServerManagerInitialisationError
 from solidlsp.ls_config import LanguageServerId
@@ -81,23 +82,35 @@ def _cleanup_leftover_pids():
 
 def test_from_languages_stops_process_of_server_that_raises_after_spawning(_cleanup_leftover_pids):
     """End-to-end: a language server whose `start()` spawns its OS subprocess and then raises
-    (e.g. a capability assertion or an initialize() timeout firing after the process is
-    already up) must not leak that process, and a sibling that started successfully must be
-    stopped too since `from_languages` fails the whole batch. The failing server cleans up its
-    own process (SolidLanguageServer.start()); `from_languages` is responsible only for
-    stopping the siblings that succeeded.
+    (e.g. a capability assertion or an initialize() timeout firing after the process is already up)
+    must not leak that process.
+
+    LOCAL PATCH, 2026-09-20: the SIBLING's fate is reversed from upstream. Upstream failed the whole
+    batch and stopped the servers that had started, reasoning that a loud failure serves the user
+    better than a silent subset. This fork degrades per language instead - see `test_ls_degrade.py`
+    and the comment in `from_languages` - because on a large repository the old policy turned one
+    language's problem into every language's outage: a C# server that could not load a vendored
+    `.csproj` took C++ down with it. The failure is still loud, as a WARNING per language and an
+    exception on any query routed to a missing one.
+
+    What is unchanged, and is the half this test was really protecting: the server that raised must
+    not leak the process it had already spawned. `SolidLanguageServer.start()` cleans up after itself,
+    and this asserts that it did.
     """
     ok_id = LanguageServerId("python")
     failing_id = LanguageServerId("rust")
     factory = _FakeLanguageServerFactory(fail_ids={failing_id})
 
-    with pytest.raises(LanguageServerManagerInitialisationError):
-        LanguageServerManager.from_languages([ok_id, failing_id], factory, project=None)
+    # A project stub is needed now that from_languages SUCCEEDS here: it goes on to construct the
+    # manager, which builds a file-change notifier from the project. The old version of this test
+    # never reached construction, because the call raised first.
+    manager = LanguageServerManager.from_languages([ok_id, failing_id], factory, project=MagicMock())
 
     time.sleep(0.3)
     pids = {ls_id: ls.proc.pid for ls_id, ls in factory.created.items() if ls.proc is not None}
     _cleanup_leftover_pids.extend(pids.values())
 
     assert set(pids) == {ok_id, failing_id}
-    assert not _pid_alive(pids[ok_id]), "the successfully-started server's process should be stopped"
     assert not _pid_alive(pids[failing_id]), "the process spawned by the server that raised post-spawn must not leak"
+    assert _pid_alive(pids[ok_id]), "the healthy server must KEEP RUNNING; one language failing is not the others' problem"
+    assert set(manager.unavailable_languages) == {failing_id.get_key()}

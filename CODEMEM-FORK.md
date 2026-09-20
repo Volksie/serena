@@ -64,6 +64,13 @@ surrounding code moved in all four cases; each commit message records what chang
 
 | `68bf8d7a` | C#: open only non-ignored `.csproj` files. **MIT component** | **[PR #2074](https://github.com/oraios/serena/pull/2074)** |
 | `3eafeb7d` | asyncio accept-loop hardening: a transient `accept()` error (`WinError 64`) no longer closes the listening socket. Was a `sitecustomize.py` in the venv on 1.7.0 and silently dropped by every reinstall; now `serena/util/accept_hardening.py`, installed by `start_mcp_server` for network transports. Not upstreamable: the bug is CPython's | local only |
+| *this commit* | **Per-language degradation on startup, plus a startup trace.** One shared deadline across all server startups instead of an unbounded join; a language that fails or times out is recorded and skipped rather than taking the working languages down with it; a query routed to a missing language **raises** instead of falling back to the first server. `[startup]` lines name each server's phase and elapsed time, and a dead server is logged with its **exit code**. Promotes what the Pyright server already did for its own initial analysis - wait, warn, proceed - to the rule for every server | local only |
+
+**Sentinel string for `layer1-state.json`: `LANGUAGE SERVER DIED: ls_id=` in `solidlsp/ls_process.py`.**
+Chosen over the `LanguageServerUnavailableError` message because it is a log literal that exists to be
+grepped, where the exception text is prose its author may reword - and a sentinel that moves reports a
+working fix as absent, which `layer1-state.json` has already been bitten by once. **Treat that literal as
+frozen**; if it ever has to change, say so where the sentinel is registered rather than only here.
 
 Everything not yet merged upstream is on this branch, including the two that are already submitted as
 pull requests - so installing `codemem` gives the whole set, and each one drops off on the next

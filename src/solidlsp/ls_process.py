@@ -623,11 +623,22 @@ class StdioLanguageServer(LanguageServerInterface):
             exception = LanguageServerTerminatedException(
                 "Unexpected error while reading stdout from language server process", self.ls_id, cause=e
             )
-        log.info("Language server stdout reader thread has terminated")
+        log.info("Language server stdout reader thread has terminated (ls_id=%s)", self.ls_id)
         if not self._is_stopping:
             if exception is None:
                 exception = LanguageServerTerminatedException("Language server stdout read process terminated unexpectedly", self.ls_id)
-            log.error(str(exception))
+            # LOCAL PATCH: name the language and the exit code. A bare "terminated unexpectedly" says a
+            # server died but not WHICH one, and the exit code is usually the whole diagnosis - a
+            # missing runtime, an OOM kill and a clean-shutdown race look identical without it. The
+            # "still running" case matters too: it means the READER failed while the process lives,
+            # which is a different bug and used to be reported as a death.
+            exit_code = self._process.poll() if self._process is not None else None
+            log.error(
+                "LANGUAGE SERVER DIED: ls_id=%s, process exit code=%s. %s",
+                self.ls_id,
+                exit_code if exit_code is not None else "none - the process is STILL RUNNING, so the reader failed rather than the server",
+                exception,
+            )
             self._cancel_pending_requests(exception)
 
     def _read_ls_process_stderr(self) -> None:
